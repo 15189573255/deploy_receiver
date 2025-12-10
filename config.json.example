@@ -1,0 +1,16 @@
+
+{
+  "port": 8022,
+  "paths": {
+    "web": "C:\\deploy\\web",
+    "api": "C:\\deploy\\api"
+  },
+  "log_dir": "logs",
+  "max_upload_mb": 500,
+  "security": {
+    "enabled": true,
+    "public_key": "运行 deploy_receiver.exe -genkey 生成的公钥(64位十六进制)",
+    "timestamp_limit": 300,
+    "allowed_ips": []
+  }
+}

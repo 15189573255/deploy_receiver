@@ -1,0 +1,18 @@
+{
+  "port": 8022,
+  "paths": {
+    "web-frontend": "C:\\deploy\\web\\frontend",
+    "web-admin": "C:\\deploy\\web\\admin",
+    "api-main": "C:\\deploy\\api\\main",
+    "api-gateway": "C:\\deploy\\api\\gateway",
+    "static": "C:\\deploy\\static"
+  },
+  "log_dir": "logs",
+  "max_upload_mb": 1024,
+  "security": {
+    "enabled": true,
+    "public_key": "这里填入公钥-运行deploy_receiver.exe -genkey生成",
+    "timestamp_limit": 300,
+    "allowed_ips": []
+  }
+}
