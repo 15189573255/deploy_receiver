@@ -132,6 +132,7 @@ python client/deploy.py dist.zip web --extract \
 deploy_receiver.exe [选项]
 
 选项:
+  -s, --service   服务模式 (静默后台运行，用于Windows服务)
   -c, --console   控制台模式运行 (调试用)
   -genkey         生成 Ed25519 密钥对
   -h, --help      显示帮助信息
@@ -145,8 +146,35 @@ deploy_receiver.exe [选项]
 | 模式 | 命令 | 说明 |
 |------|------|------|
 | **托盘模式** | `deploy_receiver.exe` | 系统托盘运行，推荐日常使用 |
+| **服务模式** | `deploy_receiver.exe -s` | 静默后台运行，无窗口无托盘 |
 | **控制台模式** | `deploy_receiver.exe -c` | 显示实时日志，调试用 |
-| **服务模式** | `install_service.bat` | Windows 服务，生产环境推荐 |
+
+### 安装为 Windows 服务 (生产环境推荐)
+
+```batch
+:: 方式1：使用脚本安装 (推荐)
+install_service.bat
+
+:: 方式2：手动安装
+sc create DeployReceiver binPath= "\"完整路径\deploy_receiver.exe\" -s" start= auto
+sc start DeployReceiver
+```
+
+### 服务管理命令
+
+```batch
+:: 查看状态
+sc query DeployReceiver
+
+:: 停止服务
+sc stop DeployReceiver
+
+:: 启动服务
+sc start DeployReceiver
+
+:: 卸载服务
+uninstall_service.bat
+```
 
 ## API 接口
 

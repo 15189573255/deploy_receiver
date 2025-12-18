@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/getlantern/systray"
+	"golang.org/x/sys/windows/svc"
 )
 
 const VERSION = "3.0.0"
@@ -36,10 +38,10 @@ type Config struct {
 
 // SecurityConfig 安全配置 (非对称签名)
 type SecurityConfig struct {
-	Enabled        bool     `json:"enabled"`          // 是否启用安全认证
-	PublicKey      string   `json:"public_key"`       // Ed25519 公钥 (服务器只存公钥!)
-	TimestampLimit int64    `json:"timestamp_limit"`  // 时间戳有效期(秒)
-	AllowedIPs     []string `json:"allowed_ips"`      // IP白名单(可选)
+	Enabled        bool     `json:"enabled"`         // 是否启用安全认证
+	PublicKey      string   `json:"public_key"`      // Ed25519 公钥 (服务器只存公钥!)
+	TimestampLimit int64    `json:"timestamp_limit"` // 时间戳有效期(秒)
+	AllowedIPs     []string `json:"allowed_ips"`     // IP白名单(可选)
 }
 
 // 全局变量
@@ -50,6 +52,7 @@ var (
 	logMutex   sync.Mutex
 	exePath    string
 	publicKey  ed25519.PublicKey
+	httpServer *http.Server
 	stats      = struct {
 		sync.Mutex
 		totalUploads   int
@@ -58,6 +61,66 @@ var (
 		failedAuth     int
 	}{}
 )
+
+// deployService 实现 Windows 服务接口
+type deployService struct{}
+
+func (m *deployService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (ssec bool, errno uint32) {
+	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown
+	changes <- svc.Status{State: svc.StartPending}
+
+	// 初始化
+	var err error
+	exePath, err = os.Executable()
+	if err != nil {
+		return
+	}
+	exePath = filepath.Dir(exePath)
+
+	configPath = filepath.Join(exePath, "config.json")
+	if err := loadConfig(); err != nil {
+		createDefaultConfig()
+		if err := loadConfig(); err != nil {
+			return
+		}
+	}
+
+	initLogger()
+	logInfo("Windows服务模式启动，端口: %d，安全认证: %v", config.Port, config.Security.Enabled)
+
+	// 启动 HTTP 服务器
+	go startServerWithShutdown()
+
+	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
+
+loop:
+	for {
+		select {
+		case c := <-r:
+			switch c.Cmd {
+			case svc.Interrogate:
+				changes <- c.CurrentStatus
+			case svc.Stop, svc.Shutdown:
+				logInfo("收到停止信号，正在关闭服务...")
+				break loop
+			default:
+				logError("未知的服务控制命令: %v", c)
+			}
+		}
+	}
+
+	changes <- svc.Status{State: svc.StopPending}
+
+	// 优雅关闭 HTTP 服务器
+	if httpServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		httpServer.Shutdown(ctx)
+	}
+
+	logInfo("服务已停止")
+	return
+}
 
 // 内嵌的图标数据
 var iconData = []byte{
@@ -88,6 +151,10 @@ func main() {
 			return
 		case "-version", "--version", "-v":
 			fmt.Printf("Deploy Receiver v%s\n", VERSION)
+			return
+		case "-service", "--service", "-s":
+			// 服务模式：静默运行，无GUI无控制台
+			runServiceMode()
 			return
 		}
 	}
@@ -120,6 +187,7 @@ func printHelp() {
   deploy_receiver.exe [选项]
 
 选项:
+  -s, --service   服务模式 (静默后台运行，用于Windows服务)
   -c, --console   命令行模式运行
   -genkey         生成密钥对 (私钥保存本地, 公钥放服务器)
   -h, --help      显示帮助信息
@@ -246,6 +314,33 @@ func onExit() {
 	logInfo("服务已停止")
 	if logFile != nil {
 		logFile.Close()
+	}
+}
+
+// runServiceMode 服务模式：作为 Windows 服务运行
+func runServiceMode() {
+	err := svc.Run("Deploy Receiver Service", &deployService{})
+	if err != nil {
+		log.Fatalf("服务运行失败: %v", err)
+	}
+}
+
+// startServerWithShutdown 启动支持优雅关闭的HTTP服务器
+func startServerWithShutdown() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/upload/", handleUpload)
+	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/", handleRoot)
+
+	httpServer = &http.Server{
+		Addr:    fmt.Sprintf(":%d", config.Port),
+		Handler: mux,
+	}
+
+	logInfo("HTTP服务器启动在 :%d", config.Port)
+
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logError("HTTP服务器错误: %v", err)
 	}
 }
 

@@ -43,8 +43,13 @@ echo.
 echo ========================================
 echo   使用方法:
 echo   1. 双击 deploy_receiver.exe 启动（托盘模式）
-echo   2. deploy_receiver.exe -c 启动（控制台模式）
-echo   3. deploy_receiver.exe -h 查看帮助
+echo   2. deploy_receiver.exe -s 启动（服务模式，静默后台运行）
+echo   3. deploy_receiver.exe -c 启动（控制台模式）
+echo   4. deploy_receiver.exe -genkey 生成密钥对
+echo   5. deploy_receiver.exe -h 查看帮助
+echo.
+echo   安装为Windows服务:
+echo   - 以管理员身份运行 install_service.bat
 echo ========================================
 echo.
 pause
