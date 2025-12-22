@@ -1,4 +1,4 @@
-# 上传整个文件夹到 Deploy Receiver
+﻿# 上传整个文件夹到 Deploy Receiver
 # 用法: .\upload_folder.ps1 -Folder "D:\dist" -PathKey "web" [-Server "http://server:8022"] [-PrivateKey "私钥"]
 
 param(
@@ -12,24 +12,15 @@ param(
     [string]$PrivateKey = ""
 )
 
-# Ed25519 签名函数
+# 获取脚本所在目录
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$SignTool = Join-Path $ScriptDir "sign\sign.exe"
+
+# Ed25519 签名函数 (使用 Go 工具)
 function Sign-Ed25519 {
     param([string]$Message, [string]$PrivateKeyHex)
 
-    $pythonScript = @"
-import sys
-try:
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    key_bytes = bytes.fromhex('$PrivateKeyHex')
-    private_key = Ed25519PrivateKey.from_private_bytes(key_bytes[:32])
-    signature = private_key.sign('$Message'.encode('utf-8'))
-    print(signature.hex())
-except Exception as e:
-    print(f'ERROR:{e}', file=sys.stderr)
-    sys.exit(1)
-"@
-
-    $result = python -c $pythonScript 2>&1
+    $result = & $SignTool $PrivateKeyHex $Message 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "签名失败: $result"
     }
@@ -52,13 +43,10 @@ if (-not (Test-Path $Folder -PathType Container)) {
 # 检查是否需要签名
 $UseSign = $PrivateKey -ne ""
 if ($UseSign) {
-    # 验证 Python 和 cryptography 是否可用
-    try {
-        $null = python -c "from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey" 2>&1
-        if ($LASTEXITCODE -ne 0) { throw "cryptography not installed" }
-    } catch {
-        Write-Host "错误: 需要安装 Python 和 cryptography 库" -ForegroundColor Red
-        Write-Host "运行: pip install cryptography" -ForegroundColor Yellow
+    # 验证签名工具是否存在
+    if (-not (Test-Path $SignTool)) {
+        Write-Host "错误: 签名工具不存在 - $SignTool" -ForegroundColor Red
+        Write-Host "请先编译签名工具: cd client/sign && go build -o sign.exe ." -ForegroundColor Yellow
         exit 1
     }
 }
@@ -101,7 +89,7 @@ foreach ($File in $Files) {
 
         # 如果启用签名，添加认证头
         if ($UseSign) {
-            $Timestamp = [int][double]::Parse((Get-Date -UFormat %s))
+            $Timestamp = [DateTimeOffset]::Now.ToUnixTimeSeconds()
             $Nonce = Generate-Nonce
             $Message = "$Timestamp$Nonce$UrlPath"
             $Signature = Sign-Ed25519 -Message $Message -PrivateKeyHex $PrivateKey
