@@ -79,10 +79,8 @@ func (m *deployService) Execute(args []string, r <-chan svc.ChangeRequest, chang
 
 	configPath = filepath.Join(exePath, "config.json")
 	if err := loadConfig(); err != nil {
-		createDefaultConfig()
-		if err := loadConfig(); err != nil {
-			return
-		}
+		// 服务模式下配置加载失败直接返回
+		return
 	}
 
 	initLogger()
@@ -161,10 +159,7 @@ func main() {
 
 	configPath = filepath.Join(exePath, "config.json")
 	if err := loadConfig(); err != nil {
-		createDefaultConfig()
-		if err := loadConfig(); err != nil {
-			log.Fatal("配置加载失败:", err)
-		}
+		log.Fatal(err)
 	}
 
 	initLogger()
@@ -369,13 +364,18 @@ func runConsoleMode() {
 }
 
 func loadConfig() error {
+	// 先检查文件是否存在
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		return fmt.Errorf("配置文件不存在: %s\n请手动创建配置文件", configPath)
+	}
+
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("无法读取配置文件: %v", err)
 	}
 
 	if err := json.Unmarshal(data, &config); err != nil {
-		return err
+		return fmt.Errorf("配置文件格式错误: %v", err)
 	}
 
 	// 设置默认值
@@ -402,41 +402,6 @@ func loadConfig() error {
 	}
 
 	return nil
-}
-
-func createDefaultConfig() {
-	config = Config{
-		Port: 8022,
-		Paths: map[string]string{
-			"web": "C:\\deploy\\web",
-			"api": "C:\\deploy\\api",
-		},
-		LogDir:    "logs",
-		MaxUpload: 500,
-		Security: SecurityConfig{
-			Enabled:        false, // 默认关闭，需要先生成密钥
-			PublicKey:      "",
-			TimestampLimit: 300,
-			AllowedIPs:     []string{},
-		},
-	}
-
-	data, _ := json.MarshalIndent(config, "", "  ")
-	os.WriteFile(configPath, data, 0644)
-
-	fmt.Println("============================================================")
-	fmt.Println("  已创建默认配置文件")
-	fmt.Println("============================================================")
-	fmt.Println("配置路径:", configPath)
-	fmt.Println()
-	fmt.Println("【重要】请执行以下步骤启用安全认证:")
-	fmt.Println()
-	fmt.Println("  1. 在本机运行: deploy_receiver.exe -genkey")
-	fmt.Println("  2. 将【公钥】填入服务器 config.json 的 security.public_key")
-	fmt.Println("  3. 将【私钥】配置到本机的客户端上传脚本")
-	fmt.Println("  4. 将 config.json 的 security.enabled 改为 true")
-	fmt.Println()
-	fmt.Println("============================================================")
 }
 
 func initLogger() {
@@ -471,7 +436,7 @@ func writeLog(level, format string, args ...interface{}) {
 
 	msg := fmt.Sprintf(format, args...)
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	logLine := fmt.Sprintf("[%s] [%s] %s\n", timestamp, level, msg)
+	logLine := fmt.Sprintf("[%s] [%s] %s\r\n", timestamp, level, msg)
 
 	fmt.Print(logLine)
 
