@@ -16,6 +16,8 @@ interface UploadTask {
   filePath: string;
   filename: string;
   size: number;
+  isDir: boolean;
+  fileCount?: number;
   status: 'pending' | 'uploading' | 'success' | 'error';
   progress: number;
   error?: string;
@@ -91,6 +93,8 @@ export default function UploadPage() {
         filePath,
         filename: info.name as string,
         size: info.size as number,
+        isDir: info.isDir as boolean,
+        fileCount: info.fileCount as number | undefined,
         status: 'pending',
         progress: 0,
       };
@@ -262,11 +266,22 @@ export default function UploadPage() {
                 className="flex items-center gap-4 px-6 py-4"
               >
                 <div className="w-10 h-10 rounded-lg bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center flex-shrink-0">
-                  <File size={20} className="text-zinc-500 dark:text-zinc-400" />
+                  {task.isDir ? (
+                    <Folder size={20} className="text-amber-500 dark:text-amber-400" />
+                  ) : (
+                    <File size={20} className="text-zinc-500 dark:text-zinc-400" />
+                  )}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex justify-between items-center mb-1">
-                    <span className="text-sm font-medium text-zinc-900 dark:text-white truncate">{task.filename}</span>
+                    <span className="text-sm font-medium text-zinc-900 dark:text-white truncate">
+                      {task.filename}
+                      {task.isDir && task.fileCount !== undefined && (
+                        <span className="ml-2 text-xs text-zinc-500 dark:text-zinc-400">
+                          ({task.fileCount} 个文件)
+                        </span>
+                      )}
+                    </span>
                     <span className="text-xs text-zinc-500 dark:text-zinc-400 flex-shrink-0 ml-2">
                       {formatSize(task.size)}
                     </span>

@@ -121,7 +121,7 @@ type UploadResultWrapper struct {
 	ServerName string `json:"serverName"`
 }
 
-// UploadFile 上传文件
+// UploadFile 上传文件或文件夹（文件夹会逐个上传文件，保持目录结构）
 func (a *App) UploadFile(serverID, pathKey, filePath string, extract bool) (*UploadResultWrapper, error) {
 	// 获取服务器信息
 	servers, err := a.db.GetServers()
@@ -151,9 +151,19 @@ func (a *App) UploadFile(serverID, pathKey, filePath string, extract bool) (*Upl
 		privateKey = keyPair.PrivateKey
 	}
 
-	// 上传文件
+	// 检查是文件还是文件夹
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("无法获取路径信息: %v", err)
+	}
+
+	if info.IsDir() {
+		// 文件夹：列出所有文件并逐个上传
+		return a.uploadFolder(server, pathKey, filePath, privateKey)
+	}
+
+	// 单个文件：直接上传
 	result, err := uploader.UploadFile(server.URL, pathKey, filePath, privateKey, extract, func(sent, total int64) {
-		// 发送进度事件到前端
 		runtime.EventsEmit(a.ctx, "upload:progress", map[string]interface{}{
 			"filename": filepath.Base(filePath),
 			"sent":     sent,
@@ -183,6 +193,106 @@ func (a *App) UploadFile(serverID, pathKey, filePath string, extract bool) (*Upl
 	}, nil
 }
 
+// uploadFolder 上传文件夹（逐个上传文件，保持目录结构）
+func (a *App) uploadFolder(server *database.Server, pathKey, folderPath, privateKey string) (*UploadResultWrapper, error) {
+	// 获取文件夹名称用于显示
+	folderName := filepath.Base(folderPath)
+
+	// 列出所有文件
+	files, err := uploader.ListFilesInDir(folderPath)
+	if err != nil {
+		return &UploadResultWrapper{
+			UploadResult: uploader.UploadResult{Success: false, Error: fmt.Sprintf("列出文件失败: %v", err)},
+			ServerName:   server.Name,
+		}, nil
+	}
+
+	if len(files) == 0 {
+		return &UploadResultWrapper{
+			UploadResult: uploader.UploadResult{Success: false, Error: "文件夹为空"},
+			ServerName:   server.Name,
+		}, nil
+	}
+
+	// 计算总大小
+	var totalSize int64
+	for _, f := range files {
+		totalSize += f.Size
+	}
+
+	// 逐个上传
+	var uploadedSize int64
+	var successCount, failCount int
+	var lastError string
+
+	for i, f := range files {
+		// 直接使用相对路径，不加文件夹名
+		serverRelPath := f.RelPath
+
+		// 发送文件开始上传事件
+		runtime.EventsEmit(a.ctx, "upload:file-start", map[string]interface{}{
+			"filename": f.RelPath,
+			"index":    i + 1,
+			"total":    len(files),
+		})
+
+		result, err := uploader.UploadSingleFile(server.URL, pathKey, f.AbsPath, serverRelPath, privateKey, func(sent, total int64) {
+			// 计算总体进度
+			currentProgress := uploadedSize + sent
+			runtime.EventsEmit(a.ctx, "upload:progress", map[string]interface{}{
+				"filename": f.RelPath,
+				"sent":     currentProgress,
+				"total":    totalSize,
+				"percent":  float64(currentProgress) / float64(totalSize) * 100,
+			})
+		})
+
+		if err != nil {
+			failCount++
+			lastError = fmt.Sprintf("%s: %v", f.RelPath, err)
+		} else if !result.Success {
+			failCount++
+			lastError = fmt.Sprintf("%s: %s", f.RelPath, result.Error)
+		} else {
+			successCount++
+		}
+
+		uploadedSize += f.Size
+	}
+
+	// 记录历史
+	status := "success"
+	errorMsg := ""
+	if failCount > 0 {
+		if successCount == 0 {
+			status = "failed"
+		} else {
+			status = "partial"
+		}
+		errorMsg = fmt.Sprintf("%d 个文件失败，最后错误: %s", failCount, lastError)
+	}
+
+	a.db.AddHistory(database.HistoryEntry{
+		ServerID:   server.ID,
+		ServerName: server.Name,
+		PathKey:    pathKey,
+		Filename:   folderName + fmt.Sprintf(" (%d 个文件)", len(files)),
+		FileSize:   totalSize,
+		Status:     status,
+		ErrorMsg:   errorMsg,
+	})
+
+	return &UploadResultWrapper{
+		UploadResult: uploader.UploadResult{
+			Success: failCount == 0,
+			Status:  fmt.Sprintf("成功 %d/%d 个文件", successCount, len(files)),
+			Size:    totalSize,
+			Error:   errorMsg,
+		},
+		ServerName: server.Name,
+	}, nil
+}
+
 // SelectFile 选择文件对话框
 func (a *App) SelectFile() (string, error) {
 	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
@@ -199,18 +309,34 @@ func (a *App) SelectFolder() (string, error) {
 	return path, err
 }
 
-// GetFileInfo 获取文件信息
+// GetFileInfo 获取文件信息（文件夹会返回总大小和文件数量）
 func (a *App) GetFileInfo(filePath string) (map[string]interface{}, error) {
 	info, err := os.Stat(filePath)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]interface{}{
+
+	result := map[string]interface{}{
 		"name":    info.Name(),
 		"size":    info.Size(),
 		"isDir":   info.IsDir(),
 		"modTime": info.ModTime().Format(time.RFC3339),
-	}, nil
+	}
+
+	// 如果是文件夹，计算总大小和文件数量
+	if info.IsDir() {
+		files, err := uploader.ListFilesInDir(filePath)
+		if err == nil {
+			var totalSize int64
+			for _, f := range files {
+				totalSize += f.Size
+			}
+			result["size"] = totalSize
+			result["fileCount"] = len(files)
+		}
+	}
+
+	return result, nil
 }
 
 // ============= 历史记录 =============
