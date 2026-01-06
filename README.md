@@ -1,67 +1,75 @@
-# Deploy Receiver v3.0
+# Deploy Receiver v1.0
 
-安全的部署文件接收器，使用 **Ed25519 非对称签名**，用于接收 Jenkins 等 CI/CD 工具推送的部署文件。
+Windows 服务器轻量级文件部署工具，基于 HTTP + Ed25519 签名验证。
 
-## 安全架构
+## 项目背景
+
+在 Windows 服务器环境中部署应用时，常见方案都有各自的痛点：
+
+| 方案 | 问题 |
+|------|------|
+| SSH/SCP | Windows 默认不支持，需额外安装 OpenSSH Server |
+| FTP/SFTP | 需安装配置 FTP 服务，明文传输不安全 |
+| 远程桌面 | 手动操作，无法自动化，不适合 CI/CD |
+| 共享文件夹 | 安全隐患大，不适合公网环境 |
+
+**Deploy Receiver** 的解决思路：
+
+- 服务端是一个轻量 HTTP 服务，单文件运行，无需安装额外组件
+- 使用 Ed25519 非对称签名保证安全，私钥留在本地，公钥放服务器
+- 提供 Python/Bash/PowerShell 客户端脚本，方便集成 Jenkins 等 CI/CD
+- 附带 GUI 客户端，支持拖拽上传、服务器管理、定时任务
+
+## 安全机制
 
 ```
 ┌─────────────────┐                    ┌─────────────────┐
-│     本机        │                    │    云服务器      │
-│  (Jenkins)      │                    │                 │
+│   本机 (Jenkins) │                    │    云服务器      │
 │                 │                    │                 │
-│  私钥 🔐        │ ── 签名请求 ──→    │   公钥 🔓        │
-│  (绝不泄露)     │                    │  (只能验证)      │
+│   私钥 [保密]    │ ── 签名请求 ──→    │   公钥 [公开]    │
+│                 │                    │                 │
 └─────────────────┘                    └─────────────────┘
-
-即使服务器被入侵，攻击者拿到公钥也无法伪造上传请求！
 ```
 
-## 安全特性
-
-| 特性 | 说明 |
+| 技术 | 说明 |
 |------|------|
-| **Ed25519 非对称签名** | 私钥只在客户端，服务器只存公钥 |
-| **时间戳防重放** | 请求5分钟内有效，过期自动拒绝 |
-| **随机 Nonce** | 每次请求唯一，防止签名复用 |
-| **路径遍历防护** | 多层检查，防止 `../` 攻击 |
-| **ZIP Slip 防护** | 解压时检查路径安全 |
-| **可选 IP 白名单** | 额外的 IP 过滤层 |
+| Ed25519 签名 | 椭圆曲线数字签名，私钥仅在客户端 |
+| 时间戳验证 | 请求 5 分钟内有效，防重放攻击 |
+| 随机 Nonce | 每次请求唯一标识，防签名复用 |
+| 路径检查 | 阻止 `../` 遍历攻击和 ZIP Slip |
+
+即使服务器被入侵，攻击者拿到公钥也无法伪造上传请求。
 
 ## 快速开始
 
-### 第一步：编译 (在任意机器上)
+### 1. 编译
 
 ```bash
-# 确保已安装 Go (https://go.dev/dl/)
+# 需要 Go 1.24+
+go build -ldflags="-s -w -H=windowsgui" -o deploy_receiver.exe
+
+# 或使用脚本
 build.bat
 ```
 
-### 第二步：生成密钥对 (在本机运行)
+### 2. 生成密钥对
 
 ```bash
 deploy_receiver.exe -genkey
 ```
 
-输出示例：
+输出：
 ```
-============================================================
-  Ed25519 密钥对已生成 (非对称加密)
-============================================================
+【公钥】放到服务器 config.json:
+a1b2c3d4...（64 位十六进制）
 
-【公钥】- 放到云服务器的 config.json 中:
-a1b2c3d4e5f6...（64位十六进制）
-
-【私钥】- 只保存在你的本机! 绝对不要泄露!
-9876fedc...（128位十六进制）
-
-============================================================
+【私钥】保存在本地，绝不上传:
+9876fedc...（128 位十六进制）
 ```
 
-### 第三步：配置云服务器
+### 3. 配置服务端
 
-1. 将 `deploy_receiver.exe` 上传到云服务器
-2. 首次运行会生成 `config.json`
-3. 编辑 `config.json`，填入**公钥**：
+首次运行自动生成 `config.json`，编辑填入公钥：
 
 ```json
 {
@@ -74,33 +82,37 @@ a1b2c3d4e5f6...（64位十六进制）
   "max_upload_mb": 500,
   "security": {
     "enabled": true,
-    "public_key": "a1b2c3d4e5f6...这里填公钥...",
+    "public_key": "a1b2c3d4...填入公钥...",
     "timestamp_limit": 300,
     "allowed_ips": []
   }
 }
 ```
 
-4. 安装为 Windows 服务：
+### 4. 启动服务
+
 ```bash
+# 控制台模式（调试）
+deploy_receiver.exe -c
+
+# 托盘模式（日常）
+deploy_receiver.exe
+
+# 安装为 Windows 服务（生产）
 install_service.bat
 ```
 
-### 第四步：本机配置客户端
+### 5. 上传文件
 
 ```bash
-# 安装 Python 依赖
+# Python 客户端
 pip install cryptography
-
-# 上传文件
 python client/deploy.py dist.zip web --extract \
-  --server http://云服务器IP:8022 \
-  --key "9876fedc...这里填私钥..."
+  --server http://服务器IP:8022 \
+  --key "私钥"
 ```
 
 ## 配置说明
-
-### 服务器配置 (config.json)
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -108,72 +120,25 @@ python client/deploy.py dist.zip web --extract \
 | `paths` | object | - | 路径映射，key 为标识，value 为目录 |
 | `log_dir` | string | "logs" | 日志目录 |
 | `max_upload_mb` | int | 500 | 最大上传大小 (MB) |
-| `security.enabled` | bool | false | 是否启用安全认证 |
-| `security.public_key` | string | - | Ed25519 公钥 (64位十六进制) |
+| `security.enabled` | bool | false | 是否启用签名验证 |
+| `security.public_key` | string | - | Ed25519 公钥 |
 | `security.timestamp_limit` | int | 300 | 时间戳有效期 (秒) |
 | `security.allowed_ips` | array | [] | IP 白名单，空则不限制 |
-
-### 多路径配置示例
-
-```json
-{
-  "paths": {
-    "web-frontend": "C:\\deploy\\web\\frontend",
-    "web-admin": "C:\\deploy\\web\\admin",
-    "api-main": "C:\\deploy\\api\\main",
-    "api-gateway": "C:\\deploy\\api\\gateway"
-  }
-}
-```
-
-## 命令行选项
-
-```
-deploy_receiver.exe [选项]
-
-选项:
-  -s, --service   服务模式 (静默后台运行，用于Windows服务)
-  -c, --console   控制台模式运行 (调试用)
-  -genkey         生成 Ed25519 密钥对
-  -h, --help      显示帮助信息
-  -v, --version   显示版本信息
-
-无参数: 系统托盘模式运行
-```
 
 ## 运行模式
 
 | 模式 | 命令 | 说明 |
 |------|------|------|
-| **托盘模式** | `deploy_receiver.exe` | 系统托盘运行，推荐日常使用 |
-| **服务模式** | `deploy_receiver.exe -s` | 静默后台运行，无窗口无托盘 |
-| **控制台模式** | `deploy_receiver.exe -c` | 显示实时日志，调试用 |
+| 托盘模式 | `deploy_receiver.exe` | 系统托盘运行 |
+| 服务模式 | `deploy_receiver.exe -s` | 静默后台，适合 Windows 服务 |
+| 控制台模式 | `deploy_receiver.exe -c` | 显示实时日志，调试用 |
 
-### 安装为 Windows 服务 (生产环境推荐)
-
-```batch
-:: 方式1：使用脚本安装 (推荐)
-install_service.bat
-
-:: 方式2：手动安装
-sc create DeployReceiver binPath= "\"完整路径\deploy_receiver.exe\" -s" start= auto
-sc start DeployReceiver
-```
-
-### 服务管理命令
-
-```batch
-:: 查看状态
-sc query DeployReceiver
-
-:: 停止服务
-sc stop DeployReceiver
-
-:: 启动服务
-sc start DeployReceiver
-
-:: 卸载服务
-uninstall_service.bat
+```bash
+# 服务管理
+sc query DeployReceiver    # 查看状态
+sc stop DeployReceiver     # 停止
+sc start DeployReceiver    # 启动
+uninstall_service.bat      # 卸载
 ```
 
 ## API 接口
@@ -184,31 +149,18 @@ uninstall_service.bat
 POST /upload/{path_key}/{filename}[?extract=true]
 ```
 
-**请求头：**
+请求头：
 ```
-X-Timestamp: Unix时间戳 (秒)
-X-Nonce: 随机字符串 (32位十六进制)
-X-Signature: Ed25519签名 (128位十六进制)
+X-Timestamp: Unix 时间戳
+X-Nonce: 32 位随机十六进制
+X-Signature: Ed25519 签名
 Content-Type: application/octet-stream
 ```
 
-**签名算法：**
+签名算法：
 ```
 message = timestamp + nonce + url_path
 signature = Ed25519.sign(message, private_key)
-```
-
-**响应示例：**
-```json
-{
-  "status": "ok",
-  "path": "C:\\deploy\\web\\dist.zip",
-  "size": 1234567,
-  "path_key": "web",
-  "filename": "dist.zip",
-  "extracted": true,
-  "extract_dir": "C:\\deploy\\web\\dist"
-}
 ```
 
 ### 健康检查
@@ -218,84 +170,58 @@ GET /health
 返回: {"status": "ok"}
 ```
 
-### 服务信息
-
-```
-GET /
-返回: {"service": "Deploy Receiver", "version": "3.0.0", ...}
-```
-
 ## 客户端脚本
 
-### Python (推荐，跨平台)
+### Python（推荐）
 
 ```bash
-# 安装依赖
 pip install cryptography
 
-# 基本用法
-python deploy.py <文件> <路径标识> [选项]
+# 命令行参数
+python client/deploy.py dist.zip web --extract \
+  -s http://server:8022 -k "私钥"
 
-# 示例
-python deploy.py dist.zip web --extract
-python deploy.py app.jar api -s http://server:8022 -k 私钥
+# 环境变量
+export DEPLOY_SERVER="http://server:8022"
+export DEPLOY_PRIVATE_KEY="私钥"
+python client/deploy.py dist.zip web --extract
 ```
 
-**环境变量方式：**
+### Bash
+
 ```bash
 export DEPLOY_SERVER="http://server:8022"
-export DEPLOY_PRIVATE_KEY="你的私钥"
-python deploy.py dist.zip web --extract
+export DEPLOY_PRIVATE_KEY="私钥"
+./client/deploy.sh dist.zip web --extract
 ```
 
-### Bash (Linux/Mac/Jenkins)
-
-```bash
-# 设置环境变量
-export DEPLOY_SERVER="http://server:8022"
-export DEPLOY_PRIVATE_KEY="你的私钥"
-
-# 上传
-./deploy.sh dist.zip web --extract
-```
-
-### PowerShell (Windows)
+### PowerShell
 
 ```powershell
-.\deploy.ps1 -File "dist.zip" -PathKey "web" -Extract `
-  -Server "http://server:8022" `
-  -PrivateKey "你的私钥"
+.\client\deploy.ps1 -File "dist.zip" -PathKey "web" -Extract `
+  -Server "http://server:8022" -PrivateKey "私钥"
 ```
 
 ## Jenkins 集成
 
-### Jenkinsfile 示例
-
 ```groovy
 pipeline {
     agent any
-
     environment {
         DEPLOY_SERVER = 'http://192.168.1.100:8022'
-        // 使用 Jenkins Credentials 存储私钥
         DEPLOY_PRIVATE_KEY = credentials('deploy-private-key')
     }
-
     stages {
         stage('Build') {
             steps {
-                sh 'npm run build'
-                sh 'cd dist && zip -r ../dist.zip .'
+                sh 'npm run build && cd dist && zip -r ../dist.zip .'
             }
         }
-
         stage('Deploy') {
             steps {
                 sh '''
                     pip install cryptography -q
-                    python3 deploy.py dist.zip web --extract \
-                        --server $DEPLOY_SERVER \
-                        --key $DEPLOY_PRIVATE_KEY
+                    python3 client/deploy.py dist.zip web --extract
                 '''
             }
         }
@@ -303,276 +229,139 @@ pipeline {
 }
 ```
 
-### 多环境部署
+## GUI 客户端
 
-```groovy
-pipeline {
-    parameters {
-        choice(name: 'ENV', choices: ['dev', 'test', 'prod'])
-    }
+基于 Wails v2 (Go + React) 构建的图形界面客户端。
 
-    stages {
-        stage('Deploy') {
-            steps {
-                script {
-                    def servers = [
-                        'dev': 'http://192.168.1.100:8022',
-                        'test': 'http://192.168.1.101:8022',
-                        'prod': 'http://192.168.1.102:8022'
-                    ]
-                    sh """
-                        python3 deploy.py dist.zip web --extract \
-                            --server ${servers[params.ENV]} \
-                            --key \$DEPLOY_PRIVATE_KEY
-                    """
-                }
-            }
-        }
-    }
-}
+### 功能
+
+| 功能 | 说明 |
+|------|------|
+| 拖拽上传 | 支持文件和文件夹，显示进度 |
+| 服务器管理 | 多服务器配置、快速切换 |
+| 密钥管理 | 生成、导入、加密存储 |
+| 历史记录 | 上传记录、快速重传 |
+| 文件监控 | 监听变化自动上传 |
+| 定时任务 | Cron 表达式定时上传 |
+
+### 编译
+
+```bash
+# 安装 Wails CLI
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+cd client-gui
+wails build
+# 输出: build/bin/DeployReceiverClient.exe
 ```
 
 ## 项目结构
 
 ```
 deploy_receiver/
-├── main.go                    # 主程序源码
-├── go.mod / go.sum            # Go 依赖
-├── build.bat                  # 编译脚本
-├── config.json.example        # 配置示例
-├── config_advanced.json.example # 高级配置示例
-├── install_service.bat        # 安装 Windows 服务
-├── uninstall_service.bat      # 卸载服务
-├── test_upload.bat            # 测试脚本
-├── README.md                  # 说明文档
-└── client/                    # 客户端脚本
-    ├── deploy.py              # Python 版 (推荐)
-    ├── deploy.sh              # Bash 版
-    └── deploy.ps1             # PowerShell 版
+├── main.go                  # 服务端入口
+├── go.mod / go.sum          # Go 依赖
+├── build.bat                # 编译脚本
+├── install_service.bat      # 安装服务
+├── uninstall_service.bat    # 卸载服务
+├── config.json.example      # 配置示例
+│
+├── client/                  # 命令行客户端
+│   ├── deploy.py            # Python 版
+│   ├── deploy.sh            # Bash 版
+│   ├── deploy.ps1           # PowerShell 版
+│   ├── upload_folder.bat    # 文件夹上传
+│   ├── upload_folder.ps1
+│   └── sign/                # Go 签名工具
+│       └── main.go
+│
+└── client-gui/              # GUI 客户端
+    ├── main.go              # Wails 入口
+    ├── app.go               # 后端逻辑
+    ├── wails.json
+    ├── internal/
+    │   ├── crypto/          # Ed25519 签名
+    │   ├── database/        # SQLite 存储
+    │   └── uploader/        # 上传逻辑
+    └── frontend/            # React 前端
+        └── src/
+            ├── App.tsx
+            └── pages/       # 页面组件
 ```
 
-编译后：
+## 开发指南
+
+### 环境要求
+
+| 工具 | 版本 | 用途 |
+|------|------|------|
+| Go | 1.24+ | 服务端、GUI 后端 |
+| Node.js | 18+ | GUI 前端 |
+| Wails CLI | v2.x | GUI 构建 |
+| Python | 3.8+ | 命令行客户端 |
+
+### 本地开发
+
+```bash
+# 服务端
+go run main.go -c
+
+# GUI 客户端（热重载）
+cd client-gui
+wails dev
 ```
-├── deploy_receiver.exe        # 可执行文件 (~6.5MB)
-├── config.json                # 配置文件 (首次运行生成)
-├── keys.txt                   # 密钥文件 (genkey生成，用后删除)
-└── logs/                      # 日志目录
-    └── deploy_2024-12-10.log
-```
-
-## 日志管理
-
-日志文件存放在 `logs/` 目录，按日期自动分割。
-
-### 日志格式
-
-```
-[2024-12-10 15:30:45] [INFO] 服务已启动，端口: 8022
-[2024-12-10 15:31:20] [INFO] [192.168.1.50] 已保存: dist.zip (1234567 bytes)
-[2024-12-10 15:32:10] [WARN] 认证失败 [10.0.0.5]: 签名验证失败
-[2024-12-10 15:33:00] [ERROR] 保存失败: permission denied
-```
-
-### 实时查看日志 (Windows 服务模式)
-
-```powershell
-# 实时滚动查看最新日志
-Get-Content "C:\path\to\deploy_receiver\logs\deploy_*.log" -Wait -Tail 30
-
-# 查看指定日期
-Get-Content "C:\path\to\deploy_receiver\logs\deploy_2024-12-10.log" -Tail 50
-```
-
-### 搜索日志
-
-```powershell
-# 搜索错误
-Select-String -Path "logs\*.log" -Pattern "ERROR"
-
-# 搜索认证失败
-Select-String -Path "logs\*.log" -Pattern "认证失败"
-
-# 搜索特定IP
-Select-String -Path "logs\*.log" -Pattern "192.168.1.50"
-```
-
-### 创建日志查看快捷方式
-
-创建 `查看日志.bat`：
-```batch
-@echo off
-powershell -Command "Get-Content 'logs\deploy_*.log' -Wait -Tail 30"
-```
-
-## 安全建议
-
-### 1. 私钥保护
-
-- **绝不**将私钥上传到服务器
-- **绝不**将私钥提交到 Git
-- 使用 Jenkins Credentials 或环境变量管理私钥
-- 定期更换密钥对
-
-### 2. 网络安全
-
-- 使用 HTTPS (前置 Nginx 反向代理)
-- 配置防火墙只允许 Jenkins 服务器访问
-- 可选：配置 `allowed_ips` 白名单
-
-### 3. 日志监控
-
-- 定期检查 `logs/` 目录
-- 监控认证失败次数
-- 设置告警规则
 
 ## 常见问题
 
-### Q: 如何更换密钥？
+**Q: 时间戳验证失败？**
 
-```bash
-# 1. 生成新密钥对
-deploy_receiver.exe -genkey
-
-# 2. 更新服务器 config.json 中的 public_key
-# 3. 更新客户端脚本中的私钥
-# 4. 重启服务
-```
-
-### Q: 时间戳验证失败？
-
-确保客户端和服务器时间同步，误差不超过 `timestamp_limit` 秒（默认300秒）。
+确保客户端和服务器时间同步，误差不超过 5 分钟。
 
 ```bash
 # Windows 同步时间
 w32tm /resync
 ```
 
-### Q: 上传大文件失败？
+**Q: 如何更换密钥？**
 
-修改 `config.json` 中的 `max_upload_mb` 值。
-
-### Q: 如何查看实时日志？
-
-```powershell
-# PowerShell
-Get-Content logs\deploy_*.log -Wait -Tail 20
-
-# 或使用控制台模式
-deploy_receiver.exe -c
+```bash
+deploy_receiver.exe -genkey   # 生成新密钥
+# 更新服务器 config.json 中的 public_key
+# 更新客户端使用的私钥
+# 重启服务
 ```
 
-### Q: 支持 HTTPS 吗？
+**Q: 支持 HTTPS 吗？**
 
-当前版本使用 HTTP。建议在前面加 Nginx 反向代理配置 SSL：
+建议前置 Nginx 反向代理：
 
 ```nginx
 server {
     listen 443 ssl;
-    server_name deploy.example.com;
-
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
-
     location / {
         proxy_pass http://127.0.0.1:8022;
-        proxy_set_header X-Real-IP $remote_addr;
     }
 }
 ```
 
-## GUI 客户端 (开发计划)
-
-计划开发一个跨平台 GUI 客户端，整合现有的命令行脚本，提供更友好的使用体验。
-
-### 技术选型
-
-| 项目 | 选择 |
-|------|------|
-| 框架 | Wails v2 (Go + Web 技术，打包成单一 exe) |
-| 前端 | React + TypeScript + Tailwind CSS |
-| 存储 | SQLite (配置、历史记录持久化) |
-| 平台 | Windows / Linux / Mac |
-
-### 功能规划
-
-| 模块 | 功能 |
-|------|------|
-| 上传 | 拖拽上传、进度显示、自动解压选项 |
-| 服务器管理 | 多服务器配置、快速切换、连接测试 |
-| 密钥管理 | 内置密钥生成、加密存储、导入导出 |
-| 历史记录 | 上传记录查询、快速重传 |
-| 文件夹监控 | 监听文件变化自动上传（热部署） |
-| 定时任务 | Cron 表达式定时上传 |
-
-### 界面预览
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Deploy Receiver Client                              [—][□][×] │
-├──────────┬──────────────────────────────────────────────────┤
-│          │                                                  │
-│  上传     │   ┌────────────────────────────────────────┐    │
-│          │   │                                        │    │
-│  服务器   │   │      拖拽文件或文件夹到这里上传          │    │
-│          │   │                                        │    │
-│  密钥     │   │           [选择文件] [选择文件夹]         │    │
-│          │   │                                        │    │
-│  历史     │   └────────────────────────────────────────┘    │
-│          │                                                  │
-│  监控     │   服务器: [生产服务器      ▼]                    │
-│          │   路径:   [web            ▼]  □ 自动解压         │
-│  定时     │                                                  │
-│          │   ──────────── 上传队列 ────────────              │
-│          │   dist.zip      ████████░░ 80%   [取消]          │
-│          │   app.jar       等待中...         [取消]          │
-│          │                                                  │
-└──────────┴──────────────────────────────────────────────────┘
-```
-
-### 项目结构
-
-```
-deploy_receiver/
-├── ...                            # 现有服务器代码
-└── client-gui/                    # GUI 客户端项目
-    ├── main.go                    # Wails 入口
-    ├── app.go                     # Go 后端逻辑
-    ├── wails.json                 # Wails 配置
-    ├── frontend/                  # React 前端
-    │   ├── src/
-    │   │   ├── App.tsx
-    │   │   ├── pages/             # 页面组件
-    │   │   └── components/        # 通用组件
-    │   └── package.json
-    └── internal/
-        ├── config/                # 配置管理
-        ├── crypto/                # Ed25519 签名
-        ├── uploader/              # 上传逻辑
-        ├── watcher/               # 文件监控 (fsnotify)
-        └── scheduler/             # 定时任务 (robfig/cron)
-```
-
-### 依赖库
-
-```
-github.com/wailsapp/wails/v2     # Wails 框架
-github.com/fsnotify/fsnotify     # 文件监控
-github.com/robfig/cron/v3        # 定时任务
-github.com/mattn/go-sqlite3      # SQLite 驱动
-```
-
-### 整合效果
-
-完成后可替代以下文件：
-- `client/deploy.py`
-- `client/deploy.sh`
-- `client/deploy.ps1`
-- `client/upload_folder.bat`
-- `client/upload_folder.ps1`
-- `client/sign/`
-
-所有功能内置到单一 GUI 客户端中。
-
 ## 许可证
 
-MIT License
+本项目采用 [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) 开源许可证。
+
+```
+Copyright 2025 ciddwd
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
